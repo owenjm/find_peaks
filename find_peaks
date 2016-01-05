@@ -1,0 +1,727 @@
+#!/usr/bin/perl -w
+
+# Copyright © 2012-2015, Owen Marshall
+
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or (at
+# your option) any later version. 
+# 
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# General Public License for more details. 
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 
+# USA
+
+use strict;
+use File::Basename;
+use 5.010;
+$|++;
+
+my $version = "1.0";
+
+print STDERR "\nfind_peaks v$version\nCopyright © 2012-15, Owen Marshall\n\n";
+
+my %vars = (
+	'fdr' => 0.01,
+	'min_count' => 2,
+	'n' => 100,
+	'frac' => 0,
+	'min_quant' => 0.95,
+	'step' => 0.01,
+	'unified_peaks' => 'max',
+);
+
+my %vars_details = (
+	'fdr' => 'False discovery rate value',
+	'min_count' => 'Minimum number of fragments to consider as a peak',
+	'n' => 'Number of iterations',
+	'frac' => 'Number of random fragments to consider per iteration',
+	'min_quant' => 'Minimum quantile for considering peaks',
+	'step' => 'Stepping for quantiles',
+	'unified_peaks' => "Method for calling peak overlaps (two options):\n\r'min': call minimum overlapping peak area\n\r'max': call maximum overlap as peak",
+);
+
+
+my @in_files;
+process_cli();
+
+# Time and date
+my ($sec,$min,$hour,$mday,$mon,$year) = localtime();
+my $date = sprintf("%04d-%02d-%02d.%02d-%02d-%02d",$year+1900,$mon+1,$mday,$hour,$min,$sec);
+
+help() unless @in_files;
+
+foreach my $fn (@in_files) {
+	my @unified_peaks;
+	my @sorted_in;
+	my @in;
+	my @sig_peaks;
+	my @peakmins;
+	
+	my %peaks;
+	my %peak_count;
+	my %peak_count_real;
+	my %log_scores;
+	my %regression;
+	my %peak_fdr_cutoff;
+	my %fdr;
+	
+	# Output file names
+	my ($name,$dir,$ext) = fileparse($fn, qr/\.[^.]*/);
+	
+	# filenames
+	my $fn_base_date = "peak_analysis.".$name.".$date";
+	my $base_dir = "$fn_base_date/";
+	my $out = "$base_dir"."$name-FDR$vars{'fdr'}";
+	my $out_peak_unified_track = $out.".peaks.gff";
+	my $out_peaks = $out."_FDR-data";
+	
+	# Load gff data files
+	load_gff(FILE=>$fn, IN_REF=>\@in);
+	
+	my $probes = @in;
+	
+	find_quants(IN_REF=>\@in, PEAKMINS_REF=>\@peakmins);
+	find_peaks(IN_REF=>\@in, PEAKMINS_REF=>\@peakmins, PEAK_COUNT=>\%peak_count, PEAKS=>\%peaks);
+	
+	# Make directory
+	mkdir($base_dir);
+	
+	# Open peaks file for writing
+	open(OUTP, ">$out_peaks")|| die "Cannot open peak file for writing: $!\n";
+	print OUTP "FDR peak call v$version\n\n";
+	print OUTP "Input file: $fn\n";
+	
+	calculate_fdr(IN_REF=>\@in, PEAKMINS_REF=>\@peakmins, PEAK_COUNT=>\%peak_count, PEAKS=>\%peaks, LOG_SCORES=>\%log_scores, REGRESSION=>\%regression);
+	
+	call_peaks_unified_redux(ITER=>1, REAL=>1, AREF=>\@in, PEAKMINS_REF=>\@peakmins, PEAK_COUNT=>\%peak_count, PEAK_COUNT_REAL=>\%peak_count_real, PEAKS=>\%peaks);
+	
+	calculate_fdr_2(IN_REF=>\@in, PEAKMINS_REF=>\@peakmins, PEAK_COUNT=>\%peak_count, PEAK_COUNT_REAL=>\%peak_count_real, PEAK_FDR_CUTOFF=>\%peak_fdr_cutoff, FDR=>\%fdr, LOG_SCORES=>\%log_scores, REGRESSION=>\%regression);
+	
+	find_significant_peaks(PEAKMINS=>\@peakmins, SIG_PEAKS=>\@sig_peaks, PEAKS=>\%peaks, PEAK_FDR_CUTOFF=>\%peak_fdr_cutoff, FDR=>\%fdr);
+	
+	$vars{'unified_peaks'} eq 'min' ?
+			make_unified_peaks_min(SIG_PEAKS=>\@sig_peaks, UNIFIED_PEAKS=>\@unified_peaks, OUT=>$out_peak_unified_track) :
+			make_unified_peaks_max(SIG_PEAKS=>\@sig_peaks, UNIFIED_PEAKS=>\@unified_peaks, OUT=>$out_peak_unified_track) ;
+		
+	print STDERR "$#unified_peaks peaks found.\n\n";
+	
+	close OUTP;
+}
+
+print STDERR "All done.\n\n";
+
+
+
+
+
+######################
+# Subroutines start here
+#
+
+sub find_significant_peaks {
+	my (%opts) = @_;
+	
+	my $peakmins = $opts{PEAKMINS};
+	my $peaks = $opts{PEAKS};
+	my $sig_peaks = $opts{SIG_PEAKS};
+	my $fdr = $opts{FDR};
+	my $peak_fdr_cutoff = $opts{PEAK_FDR_CUTOFF};
+	
+	# Generate significant peaks and unify peaks
+	print STDERR "Selecting significant peaks ...     \n";
+
+	foreach my $pm (@$peakmins) {
+		for my $i (0 .. $#{$$peaks{$pm}}) {
+			my ($chr, $pstart, $pend, $mean_pscore, $pscore, $count, $size) = @{ $$peaks{$pm}[$i] };
+			if ($count >= $$peak_fdr_cutoff{$pm}) {
+				push (@$sig_peaks, [ @{$$peaks{$pm}[$i]}, $$fdr{$pm}[$count] ]);
+			}
+		}
+	}
+	
+	print OUTP "\nNumber of peaks: $#$sig_peaks\n";
+}
+
+sub calculate_fdr_2 {
+	my (%opts) = @_;
+	my $in_ref = $opts{IN_REF};
+	my $peakmins = $opts{PEAKMINS_REF};
+	my $peak_count = $opts{PEAK_COUNT};
+	my $log_scores = $opts{LOG_SCORES};
+	my $regression = $opts{REGRESSION};
+	my $fdr = $opts{FDR};
+	my $peak_fdr_cutoff = $opts{PEAK_FDR_CUTOFF};
+	my $peak_count_real = $opts{PEAK_COUNT_REAL};
+		
+	foreach my $pm (@$peakmins) {
+		# get regression variables calculated above
+		my ($m,$b) = @{$$regression{$pm}} if $$regression{$pm}[0];
+		
+		for my $i (0 .. $#{$$peak_count_real{$pm}}) {
+			next unless $$peak_count_real{$pm}[$i];
+			my $expect = 10**($m*$i + $b);
+		
+			my $real_count = $$peak_count_real{$pm}[$i];
+			my $fdr_conservative = $expect/$real_count;
+			$$fdr{$pm}[$i]= $fdr_conservative;
+		}
+	}
+	
+	# print FDR rates
+	print OUTP "\n";
+
+	foreach my $pm (@$peakmins) {
+		print OUTP "Peak min = $pm\n";
+		for my $c (0 .. $#{$$fdr{$pm}}) {
+			next unless defined($$fdr{$pm}[$c]);
+			print OUTP "Peak size: $c\tCount: $$peak_count_real{$pm}[$c]\tFDR: $$fdr{$pm}[$c]\n";
+			$$peak_fdr_cutoff{$pm} = $c if (($$fdr{$pm}[$c]<$vars{'fdr'}) && (!$$peak_fdr_cutoff{$pm}));
+		}
+		$$peak_fdr_cutoff{$pm}||=999999999; # clumsy hack to prevent errors 
+		print OUTP "\n";
+	}
+	
+	foreach my $pm (@$peakmins) {
+		print OUTP "Peak min $pm: peak cutoff size for alpha = $vars{'fdr'} was $$peak_fdr_cutoff{$pm}\n\n";
+	}
+}
+
+sub calculate_fdr {
+	my (%opts) = @_;
+	my $in_ref = $opts{IN_REF};
+	my $peakmins = $opts{PEAKMINS_REF};
+	my $peaks = $opts{PEAKS};
+	my $peak_count = $opts{PEAK_COUNT};
+	my $log_scores = $opts{LOG_SCORES};
+	my $regression = $opts{REGRESSION};
+		
+	my $in_num = @$in_ref;
+
+	foreach my $pm (@$peakmins) {
+		print OUTP "Peak min = $pm\n";
+		for my $c (0 .. $#{$$peak_count{$pm}}) {
+			my $peak_count_avg = $$peak_count{$pm}[$c]/$vars{'n'} if $$peak_count{$pm}[$c];
+			next unless $peak_count_avg;
+	
+			if ($vars{'frac'}) {
+				$peak_count_avg = $peak_count_avg * $in_num/$vars{'frac'};
+			}
+			$$log_scores{$pm}[$c] = log($peak_count_avg)/log(10);
+			print OUTP "Peak size: $c\tCount:$peak_count_avg\n";
+		}
+		
+		# calculate exponential decay rates
+		# y= a+bx for log(y)	
+		my ($sumx, $sumy, $sumxsq, $sumxy);
+		my $n=0;
+		for my $i (0 .. $#{$$peak_count{$pm}}) {
+			next unless $$peak_count{$pm}[$i];
+			$n++;
+			$sumx   += $i;
+			$sumy   += $$log_scores{$pm}[$i];
+			$sumxsq += $i ** 2;
+			$sumxy  += $i * $$log_scores{$pm}[$i];
+		}
+		
+		next unless $n > 1;
+		
+		my $mean_x = $sumx/$n;
+		my $mean_y = $sumy/$n;
+		my $mean_xsq = $sumxsq/$n;
+		my $mean_xy = $sumxy/$n;
+		
+		my $b = ($mean_xy - ($mean_x * $mean_y)) / ($mean_xsq - ($mean_x **2));
+		my $a = $mean_y - ($b * $mean_x);
+				
+		# store values
+		$$regression{$pm}=[$b, $a];
+		print OUTP "regression: log(y) = $b(x) + $a\n";
+		
+		for my $i (0 .. $#{$$peak_count{$pm}}) {
+			next unless $$peak_count{$pm}[$i];
+			my ($b,$a) = @{$$regression{$pm}};
+			my $logval = ($b*$i + $a);
+			my $val = 10**$logval;
+			print OUTP "lin regress: $i\t$$log_scores{$pm}[$i]\t$logval\t$val\n";
+		}
+		
+		print OUTP "\n";
+	}
+}
+
+sub find_peaks {
+	my (%opts) = @_;
+	my $in_ref = $opts{IN_REF};
+	my $peakmins_ref = $opts{PEAKMINS_REF};
+	my $peaks = $opts{PEAKS};
+	my $peak_count = $opts{PEAK_COUNT};
+	
+	do {print "WARNING, unfilled key $_!    \n" unless $opts{$_}} foreach keys %opts;
+	
+	print STDERR "Duplicating ...               \n";
+	my @inr = @$in_ref;
+	
+	# Call peaks on input file
+	print STDERR "Calling peaks on input file ...\n";
+
+	for my $iter (1 .. $vars{'n'}) {
+		#print STDERR "Iteration $iter ...       \r";
+		print STDERR "Iteration $iter: [shuffling]            \r";
+		
+		if ($vars{'frac'}) {
+			# only use a fraction of the array per rep
+			my @a = inside_out(\@inr, $vars{'frac'});
+			call_peaks_unified_redux(ITER=>$iter, AREF=>\@a, PEAKMINS_REF=>$peakmins_ref, PEAK_COUNT=>$peak_count);
+		} else {
+			shuffle(\@inr);
+			call_peaks_unified_redux(ITER=>$iter, AREF=>\@inr, PEAKMINS_REF=>$peakmins_ref, PEAK_COUNT=>$peak_count);
+		}
+	}
+	
+}
+
+sub call_peaks_unified_redux {
+	my (%opts) = @_;
+	my $iter = $opts{ITER};
+	my $real = $opts{REAL};
+	my $a = $opts{AREF};
+	my $peakmins_ref = $opts{PEAKMINS_REF};
+	my $peak_count_real = $opts{PEAK_COUNT_REAL};
+	my $peaks = $opts{PEAKS};
+	my $peak_count = $opts{PEAK_COUNT};
+
+	my ($pstart, $pend, $inpeak, $pscore, $count);
+	$pstart=$pend=$pscore=$inpeak=$count=0;
+	
+	my @tmp_peak;
+	my $total = $#$a;
+	
+	if ($real) {
+		print STDERR "Calling real peaks ...            \r";
+	} else {
+		print STDERR "Iteration $iter: [processing ...]        \r";
+	}
+	
+	my $old_chr="";
+	foreach my $pm (@$peakmins_ref) {
+		for my $i (0 .. $total) {
+			my ($chr, $start, $end, $score) = @{ @$a[$i] };
+			next unless $score;
+			
+			if ($real) {
+				unless ($chr eq $old_chr) {
+					# Next chromosome
+					# (Peaks can't carry over chromosomes ... but we don't use this shortcut when randomly shuffling, for obvious reasons ...)
+					$pstart=$pend=$pscore=$inpeak=$count=0;
+					@tmp_peak = () if $real;
+				}
+			}
+			$old_chr = $chr if $real;
+			
+			unless ($inpeak) {
+				next unless $score >= $pm;
+				# record new peak
+				$pstart = $start;
+				$pend = $end;
+				$pscore = $score * ($end-$start)/1000;
+				$count++;
+				push @tmp_peak, $score if $real;
+				$inpeak = 1;
+			} else {
+				if ($score >= $pm) {
+					# still in peak
+					$count++;
+					
+					# Fragment score to deal with scoring peaks made from uneven sized fragments
+					my $fragment_score = $score * ($end-$start)/1000;
+					
+					push @tmp_peak, $score if $real;
+					$pscore += $fragment_score;
+					$pend = $end;
+				} else {
+					# out of a peak
+					if ($count >= $vars{'min_count'}) {
+						# record peak
+						if ($real) {
+							$$peak_count_real{$pm}[$count]++;
+							my $mean_pscore = sprintf('%0.2f',($pscore/(($pend-$pstart)/1000)));
+							push (@{$$peaks{$pm}},[($chr, $pstart, $pend, $mean_pscore, $pscore, $count, ($pend-$pstart))]);
+						} else {
+							$$peak_count{$pm}[$count]++;
+						}
+					} 
+					
+					# reset
+					$pstart=$pend=$pscore=$inpeak=$count=0;
+					@tmp_peak = () if $real;
+				}
+			}
+		}
+	}
+}
+
+
+sub shuffle {
+	# Fisher-Yates shuffle (Knuth shuffle)
+	my ($array) = @_;
+	my $i = @$array;
+	while ( --$i ) {
+		my $j = int rand( $i+1 );
+		@$array[$i,$j] = @$array[$j,$i];
+	}
+}
+
+sub inside_out {
+	my ($array, $frac) = @_;
+	my @a;
+	for my $i (0 .. $frac-1) {
+		my $j = int rand( $i+1 );
+		if ($j != $i) {
+			$a[$i] = $a[$j]
+		}
+		$a[$j] = @$array[$i]
+	}
+	return @a;
+}
+
+sub load_gff {
+	my (%opts) = @_;
+	my $fn = $opts{FILE};
+	my $in_ref = $opts{IN_REF};
+
+	print STDERR "Reading input file: $fn ...\n";
+	open (IN, "<$fn") || die "Unable to read $fn: $!\n";
+	
+	my $i;
+	while (<IN>) {
+		$i++;
+		print STDERR "Read $i lines ...\r" if $i%10000 == 0;
+		chomp;
+		
+		my @line = split('\t');
+		
+		my ($chr, $start, $end, $score);
+		if ($#line == 3) {
+			# bedgraph
+			($chr, $start, $end, $score) = @line;
+		} else {
+			# GFF
+			($chr, $start, $end, $score) = @line[0,3,4,5];
+		}
+		
+		next unless $start;
+		
+		$score = 0 if $score eq "NA";
+		
+		push (@$in_ref, [$chr, $start, $end, $score]);
+	}
+	
+	close (IN);
+
+	print STDERR "Sorting ...                 \n";
+	@$in_ref = sort { $a->[1] <=> $b->[1] } @$in_ref;
+	@$in_ref = sort { $a->[0] cmp $b->[0] } @$in_ref;
+}
+
+sub find_quants {
+	my (%opts) = @_;
+	
+	my $in_ref = $opts{IN_REF};
+	my $peakmins_ref = $opts{PEAKMINS_REF};
+	
+	my %seg;
+	my @frags;
+
+	my $total_coverage;
+
+	foreach my $l (@$in_ref) {	
+		my ($chr, $start, $end, $score) = @$l;
+		next unless $score;
+		$score = 0 if $score eq "NA";
+		my $size = $end-$start;
+		$total_coverage += $size;
+		push @frags, $score;
+	}
+	
+	@frags = sort {$a <=> $b} @frags;
+	
+	print STDERR "Total coverage was $total_coverage bp\n";
+	
+		my @quants;
+		for (my $q=0;$q<=1;$q+=$vars{'step'}) {
+			push @quants, [$q, int($q * @frags)] if $q > $vars{'min_quant'};
+		}
+	
+		foreach  (@quants) {
+			my $cut_off = @{$_}[0];
+			my $score = $frags[@{$_}[1]];
+			print "   Quantile ".sprintf("%0.2f",$cut_off).": ".sprintf("%0.2f",$score)."\n";
+			$seg{$cut_off} = $score;
+		}
+	
+	foreach my $c (sort {$a <=> $b} keys %seg) {
+		push (@$peakmins_ref, $seg{$c});
+	}
+}
+
+sub avg {
+	my @a = @_;
+	my $n = @a;
+	my $total;
+	
+	foreach (@a) {
+		$total+=$_;
+	}
+	my $mean = $total/$n;
+	
+	my $half = int($n/2);
+	my $median = $a[$half];
+
+	return ($mean, $median);
+}
+
+sub invlog {
+	my @r;
+	my @a = @_;
+	foreach my $n (@a) {
+		push @r, 2**$n
+	}
+	return @r;
+}
+
+sub make_unified_peaks_min {
+	my (%opts) = @_;
+	my $ref = $opts{SIG_PEAKS};
+	my $out_peak_unified_track = $opts{OUT};
+	my $unified_peaks = $opts{UNIFIED_PEAKS};
+	my $total = @$ref;
+		
+	# Unify overlapping peaks, and make significant peaks file
+	my $skipped_peaks;
+	print STDERR "Combining significant peaks ...\n";
+	
+	# unroll chromosomes for speed
+	foreach my $chr (uniq( map @{$_}[0], @$ref )) {
+		my @c = grep {@{$_}[0] eq $chr} @$ref;
+		
+		my @unified_peaks_chr;
+		foreach my $ar (@c) {
+			if (state $i++ % 100 == 0) {
+					my $pc = sprintf("%0.2f",($i*100)/$total);
+					print STDERR "$pc\% processed ...\r";
+			}
+			
+			my ($chra, $start, $end, $score, $total_score, $count, $peaklen, $fdr) = @$ar;
+			
+			# next if @unified_peaks_chr already overlaps
+			next if grep {
+						@{$_}[3] < $end
+						&& @{$_}[4] > $start
+					} @unified_peaks_chr;
+			
+			# Grab all elements that overlap
+			my @test = grep {
+						@{$_}[1] < $end
+						&& @{$_}[2] > $start
+					} @c;
+			
+			for my $j (0 .. $#test) {
+				my ($chr1, $start1, $end1, $score1, $total_score1, $count1, $peaklen1, $fdr1) = @{$test[$j]};
+				
+				next unless $start1 < $end;
+				next unless $end1 > $start;
+				
+				$start = max($start, $start1);
+				$end = min($end, $end1);
+				$score = max($score, $score1);
+				$fdr = min($fdr, $fdr1);
+			}
+			
+			push @unified_peaks_chr, [($chr, '.', '.', $start, $end, $score, '.', '.', $total_score, $fdr)];
+		}
+		
+		@$unified_peaks = (@$unified_peaks, @unified_peaks_chr);
+	}
+	
+	$total = $#$unified_peaks;
+	
+	print STDERR "Sorting unified peaks ...\n";
+	@$unified_peaks = sort { $a->[3] <=> $b->[3] } @$unified_peaks;
+	@$unified_peaks = sort { $a->[0] cmp $b->[0] } @$unified_peaks;
+	
+	print STDERR "Writing unified peaks file ...\n";
+	open(PEAKOUTUNI, ">$out_peak_unified_track") || die "Unable to open peak output track for writing: $!\n\n"; 
+	for my $j (0 .. $#$unified_peaks) {
+		print PEAKOUTUNI join("\t", @{$$unified_peaks[$j]}), "\n";
+	}
+}
+
+sub make_unified_peaks_max {
+	my (%opts) = @_;
+	my $ref = $opts{SIG_PEAKS};
+	my $out_peak_unified_track = $opts{OUT};
+	my $unified_peaks = $opts{UNIFIED_PEAKS};
+	my $total = @$ref;
+		
+	# Unify overlapping peaks, and make significant peaks file
+	my $skipped_peaks;
+	print STDERR "Combining significant peaks ...\n";
+	
+	# unroll chromosomes for speed
+	foreach my $chr (uniq( map @{$_}[0], @$ref )) {
+		my @c = grep {@{$_}[0] eq $chr} @$ref;
+		
+		my @unified_peaks_chr;
+		foreach my $ar (@c) {
+			if (state $i++ % 100 == 0) {
+					my $pc = sprintf("%0.2f",($i*100)/$total);
+					print STDERR "$pc\% processed ...\r";
+			}
+			
+			my ($chra, $start, $end, $score, $total_score, $count, $peaklen, $fdr) = @$ar;
+			
+			# next if @unified_peaks_chr already overlaps
+			next if grep {
+						@{$_}[3] < $end
+						&& @{$_}[4] > $start
+					} @unified_peaks_chr;
+			
+			# Grab all elements that overlap
+			my @test = grep {
+						@{$_}[1] < $end
+						&& @{$_}[2] > $start
+					} @c;
+			
+			for my $j (0 .. $#test) {
+				my ($chr1, $start1, $end1, $score1, $total_score1, $count1, $peaklen1, $fdr1) = @{$test[$j]};
+				
+				next unless $start1 < $end;
+				next unless $end1 > $start;
+				
+				$start = min($start, $start1);
+				$end = max($end, $end1);
+				$score = max($score, $score1);
+				$fdr = min($fdr, $fdr1);
+			}
+			
+			push @unified_peaks_chr, [($chr, '.', '.', $start, $end, $score, '.', '.', $total_score, $fdr)];
+		}
+		
+		@$unified_peaks = (@$unified_peaks, @unified_peaks_chr);
+	}
+	
+	$total = $#$unified_peaks;
+	
+	print STDERR "Sorting unified peaks ...\n";
+	@$unified_peaks = sort { $a->[3] <=> $b->[3] } @$unified_peaks;
+	@$unified_peaks = sort { $a->[0] cmp $b->[0] } @$unified_peaks;
+	
+	print STDERR "Writing unified peaks file ...\n";
+	open(PEAKOUTUNI, ">$out_peak_unified_track") || die "Unable to open peak output track for writing: $!\n\n"; 
+	for my $j (0 .. $#$unified_peaks) {
+		print PEAKOUTUNI join("\t", @{$$unified_peaks[$j]}), "\n";
+	}
+}
+
+sub max {
+    my ($max, @vars) = @_;
+	my $index=0;
+	$max||=0;
+    for my $i (0..$#vars) {
+        ($max, $index) = ($vars[$i], $i+1) if $vars[$i] > $max;
+    }
+    return $max;
+}
+
+sub min {
+    my ($min, @vars) = @_;
+	my $index=0;
+	$min||=0;
+    for my $i (0..$#vars) {
+        ($min, $index) = ($vars[$i],$i+1) if $vars[$i] < $min;
+    }
+    return $min;
+}
+
+sub uniq {
+	my %seen;
+	return grep { !$seen{$_}++ } @_;
+}
+
+
+
+sub process_cli {
+	foreach (@ARGV) {
+		if (/--(.*)=(.*)/) {
+			unless (defined($vars{$1})) {
+				print STDERR "Did not understand $_ ...\n";
+				help();
+			}
+			my ($v, $opt) = ($1,$2);
+			$vars{$v} = $opt;
+			next;
+		} elsif (/--h[elp]*/) {
+			help();
+		} elsif (/--(.*)/) {
+			print STDERR "Please add a parameter to $_ ...\n\n";
+			exit 1;
+		}
+		push @in_files, $_;
+	}
+}
+
+
+sub help {
+	print STDOUT <<EOT;
+Simple FDR random permutation peak caller
+Usage: [options] [files in bedgraph or GFF format]
+	
+Options:
+EOT
+	
+	my $opt_len = 0;
+	foreach (keys %vars) {
+		my $l = length($_);
+		#print "--> $_: $l\n";
+		$opt_len = $l if $l > $opt_len;
+	}
+	
+	$opt_len+=2;
+	
+	my $cols= `tput cols` || 80;
+	
+	my ($v, $val, $def, $def_format);
+	my $help_format = "format STDOUT =\n"
+		.' '.'^'.'<'x$opt_len . ' '. '^' . '<'x($cols-$opt_len-4) . "\n"
+		.'$v, $def_format'."\n"
+		.' '.'^'.'<'x$opt_len . '   '. '^' . '<'x($cols-$opt_len-6) . "~~\n"
+		.'$v, $def_format'."\n"
+		.".\n";
+		
+	eval $help_format;
+	die $@ if $@;
+	
+	foreach my $k (sort (keys %vars)) {
+		($v, $val, $def) = ($k, $vars{$k}, $vars_details{$k});
+		$def||="";
+		$def_format = $val ? "$def\n\r[Current value: $val]" : $def;
+		$v = "--$v";
+#		format =
+# ^<<<<<<<<<<<<<<<<<<<< ^<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+#$v, $def_format
+# ^<<<<<<<<<<<<<<<<<<<<   ^<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< ~~
+#$v, $def_format
+#.
+
+		write();
+		
+	}
+	print STDOUT "\n";
+	exit 1;
+}
