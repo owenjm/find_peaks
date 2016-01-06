@@ -22,7 +22,7 @@ use File::Basename;
 use 5.010;
 $|++;
 
-my $version = "1.0";
+my $version = "1.0.1";
 
 print STDERR "\nfind_peaks v$version\nCopyright © 2012-15, Owen Marshall\n\n";
 
@@ -87,7 +87,7 @@ foreach my $fn (@in_files) {
 	my $probes = @in;
 	
 	find_quants(IN_REF=>\@in, PEAKMINS_REF=>\@peakmins);
-	find_peaks(IN_REF=>\@in, PEAKMINS_REF=>\@peakmins, PEAK_COUNT=>\%peak_count, PEAKS=>\%peaks);
+	find_randomised_peaks(IN_REF=>\@in, PEAKMINS_REF=>\@peakmins, PEAK_COUNT=>\%peak_count, PEAKS=>\%peaks);
 	
 	# Make directory
 	mkdir($base_dir);
@@ -97,27 +97,23 @@ foreach my $fn (@in_files) {
 	print OUTP "FDR peak call v$version\n\n";
 	print OUTP "Input file: $fn\n";
 	
-	calculate_fdr(IN_REF=>\@in, PEAKMINS_REF=>\@peakmins, PEAK_COUNT=>\%peak_count, PEAKS=>\%peaks, LOG_SCORES=>\%log_scores, REGRESSION=>\%regression);
+	calculate_regressions(IN_REF=>\@in, PEAKMINS_REF=>\@peakmins, PEAK_COUNT=>\%peak_count, PEAKS=>\%peaks, LOG_SCORES=>\%log_scores, REGRESSION=>\%regression);
 	
 	call_peaks_unified_redux(ITER=>1, REAL=>1, AREF=>\@in, PEAKMINS_REF=>\@peakmins, PEAK_COUNT=>\%peak_count, PEAK_COUNT_REAL=>\%peak_count_real, PEAKS=>\%peaks);
 	
-	calculate_fdr_2(IN_REF=>\@in, PEAKMINS_REF=>\@peakmins, PEAK_COUNT=>\%peak_count, PEAK_COUNT_REAL=>\%peak_count_real, PEAK_FDR_CUTOFF=>\%peak_fdr_cutoff, FDR=>\%fdr, LOG_SCORES=>\%log_scores, REGRESSION=>\%regression);
+	calculate_fdr(IN_REF=>\@in, PEAKMINS_REF=>\@peakmins, PEAK_COUNT=>\%peak_count, PEAK_COUNT_REAL=>\%peak_count_real, PEAK_FDR_CUTOFF=>\%peak_fdr_cutoff, FDR=>\%fdr, LOG_SCORES=>\%log_scores, REGRESSION=>\%regression);
 	
 	find_significant_peaks(PEAKMINS=>\@peakmins, SIG_PEAKS=>\@sig_peaks, PEAKS=>\%peaks, PEAK_FDR_CUTOFF=>\%peak_fdr_cutoff, FDR=>\%fdr);
 	
-	$vars{'unified_peaks'} eq 'min' ?
-			make_unified_peaks_min(SIG_PEAKS=>\@sig_peaks, UNIFIED_PEAKS=>\@unified_peaks, OUT=>$out_peak_unified_track) :
-			make_unified_peaks_max(SIG_PEAKS=>\@sig_peaks, UNIFIED_PEAKS=>\@unified_peaks, OUT=>$out_peak_unified_track) ;
-		
+	make_unified_peaks(SIG_PEAKS=>\@sig_peaks, UNIFIED_PEAKS=>\@unified_peaks, OUT=>$out_peak_unified_track, TYPE=>$vars{'unified_peaks'});
+	
 	print STDERR "$#unified_peaks peaks found.\n\n";
 	
 	close OUTP;
 }
 
 print STDERR "All done.\n\n";
-
-
-
+exit 0;
 
 
 ######################
@@ -148,7 +144,7 @@ sub find_significant_peaks {
 	print OUTP "\nNumber of peaks: $#$sig_peaks\n";
 }
 
-sub calculate_fdr_2 {
+sub calculate_fdr {
 	my (%opts) = @_;
 	my $in_ref = $opts{IN_REF};
 	my $peakmins = $opts{PEAKMINS_REF};
@@ -160,7 +156,7 @@ sub calculate_fdr_2 {
 	my $peak_count_real = $opts{PEAK_COUNT_REAL};
 		
 	foreach my $pm (@$peakmins) {
-		# get regression variables calculated above
+		# get regression variables
 		my ($m,$b) = @{$$regression{$pm}} if $$regression{$pm}[0];
 		
 		for my $i (0 .. $#{$$peak_count_real{$pm}}) {
@@ -183,7 +179,7 @@ sub calculate_fdr_2 {
 			print OUTP "Peak size: $c\tCount: $$peak_count_real{$pm}[$c]\tFDR: $$fdr{$pm}[$c]\n";
 			$$peak_fdr_cutoff{$pm} = $c if (($$fdr{$pm}[$c]<$vars{'fdr'}) && (!$$peak_fdr_cutoff{$pm}));
 		}
-		$$peak_fdr_cutoff{$pm}||=999999999; # clumsy hack to prevent errors 
+		$$peak_fdr_cutoff{$pm}||= 10**10; # clumsy hack to prevent errors 
 		print OUTP "\n";
 	}
 	
@@ -192,7 +188,7 @@ sub calculate_fdr_2 {
 	}
 }
 
-sub calculate_fdr {
+sub calculate_regressions {
 	my (%opts) = @_;
 	my $in_ref = $opts{IN_REF};
 	my $peakmins = $opts{PEAKMINS_REF};
@@ -255,7 +251,7 @@ sub calculate_fdr {
 	}
 }
 
-sub find_peaks {
+sub find_randomised_peaks {
 	my (%opts) = @_;
 	my $in_ref = $opts{IN_REF};
 	my $peakmins_ref = $opts{PEAKMINS_REF};
@@ -317,7 +313,7 @@ sub call_peaks_unified_redux {
 			if ($real) {
 				unless ($chr eq $old_chr) {
 					# Next chromosome
-					# (Peaks can't carry over chromosomes ... but we don't use this shortcut when randomly shuffling, for obvious reasons ...)
+					# (Peaks can't carry over chromosomes, but we don't use this shortcut when randomly shuffling)
 					$pstart=$pend=$pscore=$inpeak=$count=0;
 					@tmp_peak = () if $real;
 				}
@@ -470,36 +466,12 @@ sub find_quants {
 	}
 }
 
-sub avg {
-	my @a = @_;
-	my $n = @a;
-	my $total;
-	
-	foreach (@a) {
-		$total+=$_;
-	}
-	my $mean = $total/$n;
-	
-	my $half = int($n/2);
-	my $median = $a[$half];
-
-	return ($mean, $median);
-}
-
-sub invlog {
-	my @r;
-	my @a = @_;
-	foreach my $n (@a) {
-		push @r, 2**$n
-	}
-	return @r;
-}
-
-sub make_unified_peaks_min {
+sub make_unified_peaks {
 	my (%opts) = @_;
 	my $ref = $opts{SIG_PEAKS};
 	my $out_peak_unified_track = $opts{OUT};
 	my $unified_peaks = $opts{UNIFIED_PEAKS};
+	my $type = $opts{TYPE};
 	my $total = @$ref;
 		
 	# Unify overlapping peaks, and make significant peaks file
@@ -537,75 +509,14 @@ sub make_unified_peaks_min {
 				next unless $start1 < $end;
 				next unless $end1 > $start;
 				
-				$start = max($start, $start1);
-				$end = min($end, $end1);
-				$score = max($score, $score1);
-				$fdr = min($fdr, $fdr1);
-			}
-			
-			push @unified_peaks_chr, [($chr, '.', '.', $start, $end, $score, '.', '.', "FDR=$fdr")];
-		}
-		
-		@$unified_peaks = (@$unified_peaks, @unified_peaks_chr);
-	}
-	
-	$total = $#$unified_peaks;
-	
-	print STDERR "Sorting unified peaks ...\n";
-	@$unified_peaks = sort { $a->[3] <=> $b->[3] } @$unified_peaks;
-	@$unified_peaks = sort { $a->[0] cmp $b->[0] } @$unified_peaks;
-	
-	print STDERR "Writing unified peaks file ...\n";
-	open(PEAKOUTUNI, ">$out_peak_unified_track") || die "Unable to open peak output track for writing: $!\n\n"; 
-	for my $j (0 .. $#$unified_peaks) {
-		print PEAKOUTUNI join("\t", @{$$unified_peaks[$j]}), "\n";
-	}
-}
-
-sub make_unified_peaks_max {
-	my (%opts) = @_;
-	my $ref = $opts{SIG_PEAKS};
-	my $out_peak_unified_track = $opts{OUT};
-	my $unified_peaks = $opts{UNIFIED_PEAKS};
-	my $total = @$ref;
-		
-	# Unify overlapping peaks, and make significant peaks file
-	my $skipped_peaks;
-	print STDERR "Combining significant peaks ...\n";
-	
-	# unroll chromosomes for speed
-	foreach my $chr (uniq( map @{$_}[0], @$ref )) {
-		my @c = grep {@{$_}[0] eq $chr} @$ref;
-		
-		my @unified_peaks_chr;
-		foreach my $ar (@c) {
-			if (state $i++ % 100 == 0) {
-					my $pc = sprintf("%0.2f",($i*100)/$total);
-					print STDERR "$pc\% processed ...\r";
-			}
-			
-			my ($chra, $start, $end, $score, $total_score, $count, $peaklen, $fdr) = @$ar;
-			
-			# next if @unified_peaks_chr already overlaps
-			next if grep {
-						@{$_}[3] < $end
-						&& @{$_}[4] > $start
-					} @unified_peaks_chr;
-			
-			# Grab all elements that overlap
-			my @test = grep {
-						@{$_}[1] < $end
-						&& @{$_}[2] > $start
-					} @c;
-			
-			for my $j (0 .. $#test) {
-				my ($chr1, $start1, $end1, $score1, $total_score1, $count1, $peaklen1, $fdr1) = @{$test[$j]};
+				if ($type eq 'min') {
+					$start = max($start, $start1);
+					$end = min($end, $end1);
+				} else {
+					$start = min($start, $start1);
+					$end = max($end, $end1);
+				}
 				
-				next unless $start1 < $end;
-				next unless $end1 > $start;
-				
-				$start = min($start, $start1);
-				$end = max($end, $end1);
 				$score = max($score, $score1);
 				$fdr = min($fdr, $fdr1);
 			}
@@ -688,7 +599,6 @@ EOT
 	my $opt_len = 0;
 	foreach (keys %vars) {
 		my $l = length($_);
-		#print "--> $_: $l\n";
 		$opt_len = $l if $l > $opt_len;
 	}
 	
