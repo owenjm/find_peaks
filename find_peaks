@@ -543,7 +543,7 @@ sub make_unified_peaks_min {
 				$fdr = min($fdr, $fdr1);
 			}
 			
-			push @unified_peaks_chr, [($chr, '.', '.', $start, $end, $score, '.', '.', $total_score, $fdr)];
+			push @unified_peaks_chr, [($chr, '.', '.', $start, $end, $score, '.', '.', "FDR=$fdr")];
 		}
 		
 		@$unified_peaks = (@$unified_peaks, @unified_peaks_chr);
@@ -610,7 +610,7 @@ sub make_unified_peaks_max {
 				$fdr = min($fdr, $fdr1);
 			}
 			
-			push @unified_peaks_chr, [($chr, '.', '.', $start, $end, $score, '.', '.', $total_score, $fdr)];
+			push @unified_peaks_chr, [($chr, '.', '.', $start, $end, $score, '.', '.', "FDR=$fdr")];
 		}
 		
 		@$unified_peaks = (@$unified_peaks, @unified_peaks_chr);
