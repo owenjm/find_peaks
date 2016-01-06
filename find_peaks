@@ -258,8 +258,6 @@ sub find_randomised_peaks {
 	my $peaks = $opts{PEAKS};
 	my $peak_count = $opts{PEAK_COUNT};
 	
-	do {print "WARNING, unfilled key $_!    \n" unless $opts{$_}} foreach keys %opts;
-	
 	print STDERR "Duplicating ...               \n";
 	my @inr = @$in_ref;
 	
@@ -440,8 +438,7 @@ sub find_quants {
 		my ($chr, $start, $end, $score) = @$l;
 		next unless $score;
 		$score = 0 if $score eq "NA";
-		my $size = $end-$start;
-		$total_coverage += $size;
+		$total_coverage += $end-$start;
 		push @frags, $score;
 	}
 	
@@ -449,17 +446,17 @@ sub find_quants {
 	
 	print STDERR "Total coverage was $total_coverage bp\n";
 	
-		my @quants;
-		for (my $q=0;$q<=1;$q+=$vars{'step'}) {
-			push @quants, [$q, int($q * @frags)] if $q > $vars{'min_quant'};
-		}
-	
-		foreach  (@quants) {
-			my $cut_off = @{$_}[0];
-			my $score = $frags[@{$_}[1]];
-			print "   Quantile ".sprintf("%0.2f",$cut_off).": ".sprintf("%0.2f",$score)."\n";
-			$seg{$cut_off} = $score;
-		}
+	my @quants;
+	for (my $q=0;$q<=1;$q+=$vars{'step'}) {
+		push @quants, [$q, int($q * @frags)] if $q > $vars{'min_quant'};
+	}
+
+	foreach  (@quants) {
+		my $cut_off = @{$_}[0];
+		my $score = $frags[@{$_}[1]];
+		printf("   Quantile %0.2f: %0.2f\n",$cut_off,$score);
+		$seg{$cut_off} = $score;
+	}
 	
 	foreach my $c (sort {$a <=> $b} keys %seg) {
 		push (@$peakmins_ref, $seg{$c});
