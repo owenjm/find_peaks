@@ -12,7 +12,7 @@ find_peaks requires Perl v5.010 or greater.  To install, copy the find_peaks exe
 
 Run the script via
 
-		find_peaks [options] [list of peak files in GFF file format]
+		find_peaks [options] [list of files in bedgraph or GFF file format]
 
 To see all usage options, run with
 	
