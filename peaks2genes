@@ -21,13 +21,13 @@ use strict;
 use 5.010;
 $|++;
 
-my $version = "1.0";
+my $version = "1.0.1";
 
 print STDERR "\npeaks2genes v$version\nCopyright © 2015, Owen Marshall\n\n";
 
 my %vars = (
 	'pad' => 0,
-	'genes_file' => '/home/owen/genomes/dmel_release/DmR6/DmR6.genes.gff',
+	'genes_file' => '',
 	'gene_pad' => 1000,
 	'mouse' => 0,
 	'promoters_only'=>0,
@@ -36,13 +36,14 @@ my %vars = (
 
 my %vars_details = (
 	'pad' => 'Add padding around peaks (bp)',
-	'genes_file' => 'GFF file of annotated genes to use [optional]',
-	'gene_pad' => 'Padding around genes [optional]',
+	'genes_file' => 'GFF file of annotated genes to use',
+	'gene_pad' => 'Consider a peak associated with a gene if it lies within this distance of the gene start or end',
 	'mouse' => 'Deals with Ensembl formatted GFFs for the mouse genome',
 	'promoters_only' => 'Only check promoters for overlap',
 	'exclude_lincs' => 'Ignore lncRNAs in output',
 );
 
+my $HOME = (getpwuid($<))[7];
 
 my @in_files;
 process_cli();
@@ -51,12 +52,19 @@ unless (@in_files) {
 	help();
 }
 
-my %scores;
-my %rank;
 my @genes;
 my @genes_f;
 my @genes_r;
 my @peaks;
+
+unless ($vars{'genes_file'}) {
+	die("Error: no genes file specified.  Please specify a valid genes file with the --genes_file option ...\n\n")
+}
+
+unless (-e $vars{'genes_file'}) {
+	die("Error: Genes file does not exist.  Please specify a valid genes file with the --genes_file option ...\n\n")
+}
+
 
 ### pipeline
 
@@ -66,6 +74,8 @@ foreach my $fn (@in_files) {
 	report_genes();
 }
 
+say "All done.\n";
+
 exit 0;
 
 
@@ -73,6 +83,7 @@ sub load_file {
 	# Load peaks file (gff)
 	my ($fn, $aref) = @_;
 	state $filenum++;
+	say "Loading $fn ...";
 	open (IN, "<$fn") || die "Unable to read input file $fn: $!\n";
 	
 	while (<IN>) {
@@ -83,15 +94,18 @@ sub load_file {
 	close (IN);
 	
 	map { @{$_}[0] =~ s/chr//g } @$aref;
-	$scores{$fn} = map { @{$_}[3] } @$aref;
-	
-	my $c = 0;
-	map { $c++; $rank{$filenum}{ @{$_}[3] }=$c } sort {@{$a}[3] <=> @{$b}[3]} @$aref;
 }
 
 sub read_genes {
 	my $fn = shift;
-	open(GENES, "<$fn")|| die "Unable to read genes input file $fn: $!\n";
+	
+	if ($fn =~ m/\.gz$/) {
+		# gzipped file
+		open (GENES, '-|', "gunzip -c $fn") || die "Error: cannot open genes file $fn: $!\n\n";
+	} else {
+		open(GENES, "<$fn")|| die "Error: cannot open genes file $fn: $!\n\n";
+	}
+	
 	while (<GENES>) {
 		my ($chr, $a, $b, $start, $end, $c, $pol, $d, $info) = split(/\t/);
 		next unless $info;
@@ -107,6 +121,8 @@ sub read_genes {
 			next if $name =~ m/^CR\d+/;
 		}
 		
+		$chr =~ s/chr//g;
+		
 		push @genes, [$chr, $start, $end, $pol, $name];
 		if ($pol eq '+') {
 			push @genes_f, [$chr, $start, $end, $pol, $name];
@@ -120,9 +136,10 @@ sub read_genes {
 
 sub report_genes {
 	say "  Searching for peaks overlapping genes ...";
-	my ($p1inc, @genes_p1i) = find_genes(\@peaks);	
-
-	write_gene_lists(\@genes_p1i, "genes.in.peak.csv");
+	my ($p1inc, @genes_overlap) = find_genes(\@peaks);	
+	
+	say "  Writing genes list ...";
+	write_gene_lists(\@genes_overlap, "genes.in.peak.csv");
 }
 
 sub write_gene_lists {
@@ -281,6 +298,7 @@ sub process_cli {
 				help();
 			}
 			my ($v, $opt) = ($1,$2);
+			$opt =~ s/~/$HOME/;
 			$vars{$v} = $opt;
 			next;
 		} elsif (/--h[elp]*/) {
