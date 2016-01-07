@@ -57,9 +57,8 @@ my $date = sprintf("%04d-%02d-%02d.%02d-%02d-%02d",$year+1900,$mon+1,$mday,$hour
 help() unless @in_files;
 
 foreach my $fn (@in_files) {
-	my @unified_peaks;
-	my @sorted_in;
 	my @in;
+	my @unified_peaks;
 	my @sig_peaks;
 	my @peakmins;
 	
