@@ -26,7 +26,7 @@ The peaks file can be used as the input to the included peaks2genes script in or
 
 		peaks2genes --help
 
-to see all usage options.  Note that the path to a genome annotation file in GFF format needs to be set with the --genes_file option.
+to see all usage options.  Note that the path to a genome annotation file in GFF format needs to be set with the --genes_file option.  For release 6 of the *Drosophila melanogaster* genome, the relevant annotation file can be obtained here: [DmR6.genes.gff](https://github.com/owenjm/polii.gene.call/blob/master/DmR6.genes.gff?raw=true).
 
 Please note that the close association of a peak with a gene does not necessarily imply direct regulation of that gene, and associations must be used as a basic guide only.  There are many examples in the literature of enhancers present in unrelated gene bodies or located a very long distance away from their target genes.
 
