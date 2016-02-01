@@ -18,6 +18,7 @@
 # USA
 
 use strict;
+use File::Basename;
 use 5.010;
 $|++;
 
@@ -69,9 +70,11 @@ unless (-e $vars{'genes_file'}) {
 ### pipeline
 
 foreach my $fn (@in_files) {
+	my ($name,$dir,$ext) = fileparse($fn, qr/\.[^.]*/);
 	load_file($fn, \@peaks);
 	read_genes($vars{'genes_file'});
-	report_genes();
+	report_genes($name,$dir);
+	say '';
 }
 
 say "All done.\n";
@@ -82,14 +85,22 @@ exit 0;
 sub load_file {
 	# Load peaks file (gff)
 	my ($fn, $aref) = @_;
-	state $filenum++;
 	say "Loading $fn ...";
 	open (IN, "<$fn") || die "Unable to read input file $fn: $!\n";
 	
 	while (<IN>) {
 		chomp;
+		next if m/^#/;
+		
 		my @tmp = split("\t");
-		push @$aref, [@tmp[0,3,4,5]] unless m/^#/;
+		
+		if ($#tmp > 1) {
+			push @$aref, [@tmp[0,3,4,5]];
+		} else {
+			# allow a list of chr:start-end ...
+			my ($chr, $start, $end) = $tmp[0] =~ m/(.*?)\:(\d+)-(\d+)/;
+			push @$aref, [$chr,$start,$end,1];
+		}
 	}
 	close (IN);
 	
@@ -135,11 +146,14 @@ sub read_genes {
 }
 
 sub report_genes {
+	my ($name,$dir) = @_;
+	$dir ||= '.';
+	
 	say "  Searching for peaks overlapping genes ...";
 	my ($p1inc, @genes_overlap) = find_genes(\@peaks);	
 	
 	say "  Writing genes list ...";
-	write_gene_lists(\@genes_overlap, "genes.in.peak.csv");
+	write_gene_lists(\@genes_overlap, "$dir/$name.genes.in.peak.csv");
 }
 
 sub write_gene_lists {
@@ -191,7 +205,7 @@ sub find_genes {
 			}
 		}
 	}
-	return ($overlap, sort {@$b[1] <=> @$a[1]} @matched);
+	return ($overlap, sort {@$b[1] <=> @$a[1]} uniq(@matched));
 }
 
 sub printout {
