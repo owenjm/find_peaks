@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 
-# Copyright © 2012-2015, Owen Marshall
+# Copyright Â© 2012-2025, Owen Marshall
 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -22,18 +22,20 @@ use File::Basename;
 use 5.010;
 $|++;
 
-my $version = "1.0.1";
+my $version = "1.2";
 
-print STDERR "\nfind_peaks v$version\nCopyright © 2012-15, Owen Marshall\n\n";
+print STDERR "\nfind_peaks v$version\nCopyright Â© 2012-25, Owen Marshall\n\n";
 
 my %vars = (
 	'fdr' => 0.01,
 	'min_count' => 2,
 	'n' => 100,
-	'frac' => 0,
-	'min_quant' => 0.95,
+	'frac' => 100000,
+	'min_quant' => 0.8,
 	'step' => 0.01,
-	'unified_peaks' => 'max',
+	'unified_peaks' => 'min',
+	'seed' => 123,
+	'format' => 'gff',
 );
 
 my %vars_details = (
@@ -44,11 +46,13 @@ my %vars_details = (
 	'min_quant' => 'Minimum quantile for considering peaks',
 	'step' => 'Stepping for quantiles',
 	'unified_peaks' => "Method for calling peak overlaps (two options):\n\r'min': call minimum overlapping peak area\n\r'max': call maximum overlap as peak",
+	'seed' => 'Random seed to use',
+	'format' => "Output file format (two options):\n\r'gff' (default, provides FDR values and max occupancy score)\n\r'bed' (simple 3 column BED, regions only)",
 );
-
 
 my @in_files;
 process_cli();
+sanity_checks();
 
 # Time and date
 my ($sec,$min,$hour,$mday,$mon,$year) = localtime();
@@ -57,6 +61,9 @@ my $date = sprintf("%04d-%02d-%02d.%02d-%02d-%02d",$year+1900,$mon+1,$mday,$hour
 help() unless @in_files;
 
 foreach my $fn (@in_files) {
+	# set random seed for each file
+	srand($vars{'seed'});
+	
 	my @in;
 	my @unified_peaks;
 	my @sig_peaks;
@@ -75,39 +82,43 @@ foreach my $fn (@in_files) {
 	
 	# filenames
 	my $fn_base_date = "peak_analysis.".$name.".$date";
-	my $base_dir = "$fn_base_date/";
-	my $out = "$base_dir"."$name-FDR$vars{'fdr'}";
-	my $out_peak_unified_track = $out.".peaks.gff";
-	my $out_peaks = $out."_FDR-data";
+	#my $base_dir = "$fn_base_date/";
+	my $out = "$name-FDR$vars{'fdr'}";
+	my $out_peak_unified_track = $out.".peaks.".$vars{'format'};
+	my $log = $out.".log";
 	
 	# Load gff data files
 	load_gff(FILE=>$fn, IN_REF=>\@in);
 	
 	my $probes = @in;
+	if ($vars{'frac'}>$probes) {
+		print STDOUT sprintf("  Number of bins (%d) is less than --frac option; setting --frac to the full dataset.\n",$probes);
+		$vars{'frac'} = $probes;
+	}
 	
 	find_quants(IN_REF=>\@in, PEAKMINS_REF=>\@peakmins);
 	find_randomised_peaks(IN_REF=>\@in, PEAKMINS_REF=>\@peakmins, PEAK_COUNT=>\%peak_count, PEAKS=>\%peaks);
 	
-	# Make directory
-	mkdir($base_dir);
-	
 	# Open peaks file for writing
-	open(OUTP, ">$out_peaks")|| die "Cannot open peak file for writing: $!\n";
+	open(OUTP, ">$log")|| die "Cannot open peak file for writing: $!\n";
 	print OUTP "FDR peak call v$version\n\n";
-	print OUTP "Input file: $fn\n";
+	print OUTP "Run started on: $date\n";
+	print OUTP "Input file: $fn\n\nOptions:\n";
+	
+	for my $v (keys %vars) {
+		print OUTP "  --$v=$vars{$v}\n";
+	}
+	
+	print OUTP "\nPeak regression cutoffs at FDR = $vars{'fdr'}:\n";
 	
 	calculate_regressions(IN_REF=>\@in, PEAKMINS_REF=>\@peakmins, PEAK_COUNT=>\%peak_count, PEAKS=>\%peaks, LOG_SCORES=>\%log_scores, REGRESSION=>\%regression);
-	
 	call_peaks_unified_redux(ITER=>1, REAL=>1, AREF=>\@in, PEAKMINS_REF=>\@peakmins, PEAK_COUNT=>\%peak_count, PEAK_COUNT_REAL=>\%peak_count_real, PEAKS=>\%peaks);
-	
 	calculate_fdr(IN_REF=>\@in, PEAKMINS_REF=>\@peakmins, PEAK_COUNT=>\%peak_count, PEAK_COUNT_REAL=>\%peak_count_real, PEAK_FDR_CUTOFF=>\%peak_fdr_cutoff, FDR=>\%fdr, LOG_SCORES=>\%log_scores, REGRESSION=>\%regression);
-	
 	find_significant_peaks(PEAKMINS=>\@peakmins, SIG_PEAKS=>\@sig_peaks, PEAKS=>\%peaks, PEAK_FDR_CUTOFF=>\%peak_fdr_cutoff, FDR=>\%fdr);
-	
 	make_unified_peaks(SIG_PEAKS=>\@sig_peaks, UNIFIED_PEAKS=>\@unified_peaks, OUT=>$out_peak_unified_track, TYPE=>$vars{'unified_peaks'});
 	
-	print STDERR "$#unified_peaks peaks found.\n\n";
-	
+	print OUTP "\n$#unified_peaks peaks found.\n\n";
+	print STDOUT "$#unified_peaks peaks found.\n\n";
 	close OUTP;
 }
 
@@ -140,7 +151,7 @@ sub find_significant_peaks {
 		}
 	}
 	
-	print OUTP "\nNumber of peaks: $#$sig_peaks\n";
+	#print OUTP "\nNumber of peaks: $#$sig_peaks\n";
 }
 
 sub calculate_fdr {
@@ -169,21 +180,21 @@ sub calculate_fdr {
 	}
 	
 	# print FDR rates
-	print OUTP "\n";
+	#print OUTP "\n";
 
 	foreach my $pm (@$peakmins) {
-		print OUTP "Peak min = $pm\n";
+		#print OUTP "Peak min = $pm\n";
 		for my $c (0 .. $#{$$fdr{$pm}}) {
 			next unless defined($$fdr{$pm}[$c]);
-			print OUTP "Peak size: $c\tCount: $$peak_count_real{$pm}[$c]\tFDR: $$fdr{$pm}[$c]\n";
+			#print OUTP "Peak size: $c\tCount: $$peak_count_real{$pm}[$c]\tFDR: $$fdr{$pm}[$c]\n";
 			$$peak_fdr_cutoff{$pm} = $c if (($$fdr{$pm}[$c]<$vars{'fdr'}) && (!$$peak_fdr_cutoff{$pm}));
 		}
 		$$peak_fdr_cutoff{$pm}||= 10**10; # clumsy hack to prevent errors 
-		print OUTP "\n";
+		#print OUTP "\n";
 	}
 	
 	foreach my $pm (@$peakmins) {
-		print OUTP "Peak min $pm: peak cutoff size for alpha = $vars{'fdr'} was $$peak_fdr_cutoff{$pm}\n\n";
+		print OUTP "  Peak min $pm: $$peak_fdr_cutoff{$pm}\n";
 	}
 }
 
@@ -199,7 +210,7 @@ sub calculate_regressions {
 	my $in_num = @$in_ref;
 
 	foreach my $pm (@$peakmins) {
-		print OUTP "Peak min = $pm\n";
+		#print OUTP "Peak min = $pm\n";
 		for my $c (0 .. $#{$$peak_count{$pm}}) {
 			my $peak_count_avg = $$peak_count{$pm}[$c]/$vars{'n'} if $$peak_count{$pm}[$c];
 			next unless $peak_count_avg;
@@ -208,7 +219,7 @@ sub calculate_regressions {
 				$peak_count_avg = $peak_count_avg * $in_num/$vars{'frac'};
 			}
 			$$log_scores{$pm}[$c] = log($peak_count_avg)/log(10);
-			print OUTP "Peak size: $c\tCount:$peak_count_avg\n";
+			#print OUTP "Peak size: $c\tCount:$peak_count_avg\n";
 		}
 		
 		# calculate exponential decay rates
@@ -236,17 +247,17 @@ sub calculate_regressions {
 				
 		# store values
 		$$regression{$pm}=[$b, $a];
-		print OUTP "regression: log(y) = $b(x) + $a\n";
+		#print OUTP "regression: log(y) = $b(x) + $a\n";
 		
 		for my $i (0 .. $#{$$peak_count{$pm}}) {
 			next unless $$peak_count{$pm}[$i];
 			my ($b,$a) = @{$$regression{$pm}};
 			my $logval = ($b*$i + $a);
 			my $val = 10**$logval;
-			print OUTP "lin regress: $i\t$$log_scores{$pm}[$i]\t$logval\t$val\n";
+			#print OUTP "lin regress: $i\t$$log_scores{$pm}[$i]\t$logval\t$val\n";
 		}
 		
-		print OUTP "\n";
+		#print OUTP "\n";
 	}
 }
 
@@ -257,24 +268,20 @@ sub find_randomised_peaks {
 	my $peaks = $opts{PEAKS};
 	my $peak_count = $opts{PEAK_COUNT};
 	
-	print STDERR "Duplicating ...               \n";
-	my @inr = @$in_ref;
+	#print STDERR "Duplicating ...               \n";
+	#my @inr = @$in_ref;
 	
 	# Call peaks on input file
 	print STDERR "Calling peaks on input file ...\n";
 
 	for my $iter (1 .. $vars{'n'}) {
-		#print STDERR "Iteration $iter ...       \r";
-		print STDERR "Iteration $iter: [shuffling]            \r";
+		print STDERR "  Iteration $iter ...           \r";
 		
-		if ($vars{'frac'}) {
-			# only use a fraction of the array per rep
-			my @a = inside_out(\@inr, $vars{'frac'});
-			call_peaks_unified_redux(ITER=>$iter, AREF=>\@a, PEAKMINS_REF=>$peakmins_ref, PEAK_COUNT=>$peak_count);
-		} else {
-			shuffle(\@inr);
-			call_peaks_unified_redux(ITER=>$iter, AREF=>\@inr, PEAKMINS_REF=>$peakmins_ref, PEAK_COUNT=>$peak_count);
-		}
+		# if frac not set, use entire array
+		$vars{'frac'}||= $#$in_ref;
+		
+		my @a = inside_out(\@$in_ref, $vars{'frac'});
+		call_peaks_unified_redux(ITER=>$iter, AREF=>\@a, PEAKMINS_REF=>$peakmins_ref, PEAK_COUNT=>$peak_count);
 	}
 	
 }
@@ -296,9 +303,9 @@ sub call_peaks_unified_redux {
 	my $total = $#$a;
 	
 	if ($real) {
-		print STDERR "Calling real peaks ...            \r";
+		print STDERR "Calling peaks ...                        \r";
 	} else {
-		print STDERR "Iteration $iter: [processing ...]        \r";
+		#print STDERR "Iteration $iter: [processing ...]        \r";
 	}
 	
 	my $old_chr="";
@@ -372,15 +379,15 @@ sub shuffle {
 
 sub inside_out {
 	my ($array, $frac) = @_;
-	my @a;
+	my @ar;
 	for my $i (0 .. $frac-1) {
 		my $j = int rand( $i+1 );
 		if ($j != $i) {
-			$a[$i] = $a[$j]
+			$ar[$i] = $ar[$j];
 		}
-		$a[$j] = @$array[$i]
+		$ar[$j] = @$array[$i];
 	}
-	return @a;
+	return @ar;
 }
 
 sub load_gff {
@@ -389,7 +396,15 @@ sub load_gff {
 	my $in_ref = $opts{IN_REF};
 
 	print STDERR "Reading input file: $fn ...\n";
-	open (IN, "<$fn") || die "Unable to read $fn: $!\n";
+	
+	# Support gzip compressed input files
+	if ($fn =~ m/\.gz$/) {
+		open(IN, "gunzip -c $fn |") || die "ERROR: Cannot open input for reading: $!\n";
+	} else {
+		open(IN, "<$fn") || die "ERROR: Cannot open input for reading: $!\n";
+	}
+	
+	#open (IN, "<$fn") || die "Unable to read $fn: $!\n";
 	
 	my $i;
 	while (<IN>) {
@@ -397,7 +412,9 @@ sub load_gff {
 		print STDERR "Read $i lines ...\r" if $i%10000 == 0;
 		chomp;
 		
-		my @line = split('\t');
+		my @line = split('\s+');
+		
+		next if $line[0] =~ m/^track/;
 		
 		my ($chr, $start, $end, $score);
 		if ($#line == 3) {
@@ -517,7 +534,7 @@ sub make_unified_peaks {
 				$fdr = min($fdr, $fdr1);
 			}
 			
-			push @unified_peaks_chr, [($chr, '.', '.', $start, $end, $score, '.', '.', "FDR=$fdr")];
+			push @unified_peaks_chr, [($chr, '.', '.', $start, $end, $score, '.', '.', "FDR=$fdr;Name=$chr:$start-$end;")];
 		}
 		
 		@$unified_peaks = (@$unified_peaks, @unified_peaks_chr);
@@ -529,10 +546,17 @@ sub make_unified_peaks {
 	@$unified_peaks = sort { $a->[3] <=> $b->[3] } @$unified_peaks;
 	@$unified_peaks = sort { $a->[0] cmp $b->[0] } @$unified_peaks;
 	
-	print STDERR "Writing unified peaks file ...\n";
+	# Write output file
+	print STDERR "Writing peaks file ...\n";
 	open(PEAKOUTUNI, ">$out_peak_unified_track") || die "Unable to open peak output track for writing: $!\n\n"; 
 	for my $j (0 .. $#$unified_peaks) {
-		print PEAKOUTUNI join("\t", @{$$unified_peaks[$j]}), "\n";
+		if ($vars{'format'} =~ m/gff/i) {
+			# GFF format
+			print PEAKOUTUNI join("\t", @{$$unified_peaks[$j]}), "\n";
+		} else {
+			# 3 column BED format
+			print PEAKOUTUNI join("\t", @{$$unified_peaks[$j]}[0,3,4]), "\n";
+		}
 	}
 }
 
@@ -561,6 +585,29 @@ sub uniq {
 	return grep { !$seen{$_}++ } @_;
 }
 
+sub sanity_checks {
+	foreach my $v (keys %vars) {
+		die "Error: option $v is unset.\n\n" unless $vars{$v};
+	}
+	
+	# numeric fraction
+	foreach my $v ('fdr','min_quant','step') {
+		die "Error: option $v must be a fraction between 0 and 1.\n\n" unless 0 < $vars{$v} < 1;
+	}
+	
+	# integer
+	foreach my $v ('seed','min_count','n','frac') {
+		die "Error: option $v must be an integer.\n\n" unless $vars{$v} == int($vars{$v});
+	}
+	
+	unless ($vars{'unified_peaks'} =~ m/^(min|max)$/) {
+		die "Error: unified_peaks must be set to either 'min' or 'max'.\n\n";
+	}
+	
+	unless ($vars{'format'} =~ m/^(gff|bed)$/i) {
+		die "Error: format must be set to either 'gff' or 'bed'.\n\n";
+	}
+}
 
 
 sub process_cli {
